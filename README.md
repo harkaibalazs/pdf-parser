@@ -80,6 +80,23 @@ Default output goes to `output/<pdf-stem>/`.
 
 If the Tesseract binary is not on `PATH`, the parser prints a warning and continues without OCR — `ocr_text` fields will be empty but everything else still works.
 
+## Web GUI
+
+A small Flask front-end (`webgui.py`) wraps the CLI so you can upload a PDF,
+set the options in a browser, run the parser server-side, and download the
+output as a zip.
+
+```bash
+.venv/bin/pip install -r requirements.txt   # includes Flask
+.venv/bin/python webgui.py                   # serves http://127.0.0.1:5000
+```
+
+Open the URL, pick a PDF, adjust the options (OCR on/off, OCR language, min
+image size, context chars), and click **Parse PDF**. The parser runs as a
+subprocess of `main.py`; on success a download button returns
+`document.md` + `manifest.json` + `images/` packed into a single `.zip`.
+Per-run files live under `web_runs/` (gitignored).
+
 ## Output schema
 
 ### `manifest.json`
