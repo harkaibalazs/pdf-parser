@@ -80,6 +80,46 @@ Default output goes to `output/<pdf-stem>/`.
 
 If the Tesseract binary is not on `PATH`, the parser prints a warning and continues without OCR — `ocr_text` fields will be empty but everything else still works.
 
+## Web GUI
+
+A small Flask front-end (`webgui.py`) wraps the CLI so you can upload a PDF,
+set the options in a browser, run the parser server-side, and download the
+output as a zip.
+
+```bash
+.venv/bin/pip install -r requirements.txt   # includes Flask
+.venv/bin/python webgui.py                   # serves http://127.0.0.1:5000
+```
+
+Open the URL, pick a PDF, adjust the options (OCR on/off, OCR language, min
+image size, context chars), and click **Parse PDF**. The parser runs as a
+subprocess of `main.py`; on success a download button returns
+`document.md` + `manifest.json` + `images/` packed into a single `.zip`.
+Per-run files live under `web_runs/` (gitignored).
+
+### Run it in Docker
+
+The `Dockerfile` builds an image that serves the web GUI with
+[gunicorn](https://gunicorn.org/) (multiple workers, so several uploads can be
+parsed concurrently) and Tesseract preinstalled for OCR:
+
+```bash
+docker build -t pdf-parser-web .
+docker run --rm -p 5000:5000 pdf-parser-web
+```
+
+Then open http://127.0.0.1:5000. Tunables (env vars, with defaults):
+
+| Var | Default | Description |
+| --- | --- | --- |
+| `PORT` | `5000` | Port gunicorn binds inside the container |
+| `WEB_CONCURRENCY` | `4` | Number of worker processes |
+| `GUNICORN_THREADS` | `2` | Threads per worker |
+| `GUNICORN_TIMEOUT` | `600` | Worker timeout (s); generous because each request parses synchronously |
+
+Running `python webgui.py` directly still uses Flask's built-in dev server
+(single-process) and honours `HOST` / `PORT` / `DEBUG` — handy for local work.
+
 ## Output schema
 
 ### `manifest.json`

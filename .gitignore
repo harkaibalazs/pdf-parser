@@ -23,6 +23,7 @@ Thumbs.db
 # Project data
 input/
 output/
+web_runs/
 
 # Logs
 *.log
