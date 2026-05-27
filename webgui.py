@@ -34,6 +34,11 @@ MAX_UPLOAD_BYTES = 200 * 1024 * 1024  # 200 MB
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
 
+# Created at import time so it also exists under gunicorn (which never runs
+# the __main__ block below). Per-run files are keyed by job_id on disk, so
+# any worker can serve a download regardless of which one produced it.
+RUNS_DIR.mkdir(exist_ok=True)
+
 PAGE = """<!doctype html>
 <html lang="en">
 <head>
@@ -204,7 +209,6 @@ def download(job_id):
 
 
 if __name__ == "__main__":
-    RUNS_DIR.mkdir(exist_ok=True)
     host = os.environ.get("HOST", "127.0.0.1")
     port = int(os.environ.get("PORT", "5000"))
     debug = os.environ.get("DEBUG", "0") == "1"

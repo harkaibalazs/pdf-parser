@@ -99,17 +99,26 @@ Per-run files live under `web_runs/` (gitignored).
 
 ### Run it in Docker
 
-The `Dockerfile` builds an image that serves the web GUI (with Tesseract
-preinstalled for OCR):
+The `Dockerfile` builds an image that serves the web GUI with
+[gunicorn](https://gunicorn.org/) (multiple workers, so several uploads can be
+parsed concurrently) and Tesseract preinstalled for OCR:
 
 ```bash
 docker build -t pdf-parser-web .
 docker run --rm -p 5000:5000 pdf-parser-web
 ```
 
-Then open http://127.0.0.1:5000. Inside the container the server binds
-`0.0.0.0` via the `HOST` env var; `PORT` (default `5000`) and `DEBUG`
-(`1` to enable) are also configurable.
+Then open http://127.0.0.1:5000. Tunables (env vars, with defaults):
+
+| Var | Default | Description |
+| --- | --- | --- |
+| `PORT` | `5000` | Port gunicorn binds inside the container |
+| `WEB_CONCURRENCY` | `4` | Number of worker processes |
+| `GUNICORN_THREADS` | `2` | Threads per worker |
+| `GUNICORN_TIMEOUT` | `600` | Worker timeout (s); generous because each request parses synchronously |
+
+Running `python webgui.py` directly still uses Flask's built-in dev server
+(single-process) and honours `HOST` / `PORT` / `DEBUG` — handy for local work.
 
 ## Output schema
 
