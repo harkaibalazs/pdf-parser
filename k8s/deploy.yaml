@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pdf-parser
+  labels:
+    app.kubernetes.io/name: pdf-parser
+spec:
+  # Kept at 1 because each run stores its output on the pod's local disk
+  # (/app/web_runs) keyed by job id. A download could otherwise land on a
+  # different replica than the one that produced it. To scale out, switch
+  # web_runs to a shared ReadWriteMany volume (or add session affinity).
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pdf-parser
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pdf-parser
+    spec:
+      containers:
+        - name: web
+          image: ghcr.io/harkaibalazs/pdf-parser:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 5000
+          env:
+            - name: PORT
+              value: "5000"
+            - name: WEB_CONCURRENCY
+              value: "4"
+            - name: GUNICORN_TIMEOUT
+              value: "600"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - name: runs
+              mountPath: /app/web_runs
+      volumes:
+        # Ephemeral scratch space for uploads + generated output.
+        - name: runs
+          emptyDir: {}

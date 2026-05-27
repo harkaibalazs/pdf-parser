@@ -137,6 +137,24 @@ Tags follow the branch/tag (`main`, `v1.2.3`, `1.2`), plus the commit SHA and
 `GITHUB_TOKEN`, so no extra secrets are needed — just ensure the package is
 allowed to be created under the repo/org settings.
 
+### Kubernetes
+
+Manifests in [`k8s/`](k8s/) deploy the published image behind the Gateway API:
+
+- `deploy.yaml` — Deployment of the gunicorn image with health probes and an
+  `emptyDir` scratch volume for `web_runs/`.
+- `service.yaml` — ClusterIP Service exposing port `80` → container `5000`.
+- `httproute.yaml` — HTTPRoute attaching to a Gateway named `default-gateway`.
+
+```bash
+kubectl apply -f k8s/
+```
+
+The Deployment runs a single replica because per-run output is stored on the
+pod's local disk; to scale out, back `web_runs/` with a shared `ReadWriteMany`
+volume or add session affinity. Edit the `namespace`/`hostnames` fields in
+`httproute.yaml` to match your cluster's Gateway.
+
 ## Output schema
 
 ### `manifest.json`

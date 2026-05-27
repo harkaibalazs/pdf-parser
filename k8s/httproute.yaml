@@ -1,0 +1,24 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: pdf-parser
+  labels:
+    app.kubernetes.io/name: pdf-parser
+spec:
+  parentRefs:
+    # Attaches to the shared Gateway named "default-gateway".
+    # Uncomment `namespace` if that Gateway lives in another namespace.
+    - name: default-gateway
+      # namespace: gateway-system
+      # sectionName: http
+  # Restrict to a host by uncommenting and editing:
+  # hostnames:
+  #   - pdf-parser.example.com
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: pdf-parser
+          port: 80
