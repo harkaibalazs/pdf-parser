@@ -9,7 +9,7 @@ spec:
     # Attaches to the shared Gateway named "default-gateway".
     # Uncomment `namespace` if that Gateway lives in another namespace.
     - name: default-gateway
-      # namespace: gateway-system
+      namespace: default
       # sectionName: http
   # Restrict to a host by uncommenting and editing:
   # hostnames:
