@@ -120,6 +120,23 @@ Then open http://127.0.0.1:5000. Tunables (env vars, with defaults):
 Running `python webgui.py` directly still uses Flask's built-in dev server
 (single-process) and honours `HOST` / `PORT` / `DEBUG` — handy for local work.
 
+### Published image (CI)
+
+The [`docker-publish`](.github/workflows/docker-publish.yml) GitHub Action
+builds the image and pushes it to the GitHub Container Registry on every push
+to `main` and every `v*` tag (pull requests are built but not pushed). Pull the
+latest published image with:
+
+```bash
+docker pull ghcr.io/harkaibalazs/pdf-parser:latest
+docker run --rm -p 5000:5000 ghcr.io/harkaibalazs/pdf-parser:latest
+```
+
+Tags follow the branch/tag (`main`, `v1.2.3`, `1.2`), plus the commit SHA and
+`latest` for the default branch. The image uses the repo's built-in
+`GITHUB_TOKEN`, so no extra secrets are needed — just ensure the package is
+allowed to be created under the repo/org settings.
+
 ## Output schema
 
 ### `manifest.json`
