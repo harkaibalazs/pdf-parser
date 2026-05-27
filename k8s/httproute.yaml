@@ -12,8 +12,8 @@ spec:
       namespace: default
       # sectionName: http
   # Restrict to a host by uncommenting and editing:
-  # hostnames:
-  #   - pdf-parser.example.com
+  hostnames:
+    - pdf.tutgroup.hu
   rules:
     - matches:
         - path:
