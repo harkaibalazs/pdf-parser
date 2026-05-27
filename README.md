@@ -97,6 +97,20 @@ subprocess of `main.py`; on success a download button returns
 `document.md` + `manifest.json` + `images/` packed into a single `.zip`.
 Per-run files live under `web_runs/` (gitignored).
 
+### Run it in Docker
+
+The `Dockerfile` builds an image that serves the web GUI (with Tesseract
+preinstalled for OCR):
+
+```bash
+docker build -t pdf-parser-web .
+docker run --rm -p 5000:5000 pdf-parser-web
+```
+
+Then open http://127.0.0.1:5000. Inside the container the server binds
+`0.0.0.0` via the `HOST` env var; `PORT` (default `5000`) and `DEBUG`
+(`1` to enable) are also configurable.
+
 ## Output schema
 
 ### `manifest.json`

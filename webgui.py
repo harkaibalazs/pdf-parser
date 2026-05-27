@@ -9,10 +9,10 @@ Run with:
 then open http://127.0.0.1:5000
 """
 
+import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import uuid
 import zipfile
 from pathlib import Path
@@ -205,4 +205,7 @@ def download(job_id):
 
 if __name__ == "__main__":
     RUNS_DIR.mkdir(exist_ok=True)
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    host = os.environ.get("HOST", "127.0.0.1")
+    port = int(os.environ.get("PORT", "5000"))
+    debug = os.environ.get("DEBUG", "0") == "1"
+    app.run(host=host, port=port, debug=debug)
