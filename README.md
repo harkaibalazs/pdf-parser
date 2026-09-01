@@ -82,20 +82,80 @@ If the Tesseract binary is not on `PATH`, the parser prints a warning and contin
 
 ## Web GUI
 
-A small Flask front-end (`webgui.py`) wraps the CLI so you can upload a PDF,
-set the options in a browser, run the parser server-side, and download the
-output as a zip.
+A small Flask front-end (`webgui.py`) wraps the CLI so you can upload a PDF —
+or a ZIP archive of PDFs — set the options in a browser, run the parser
+server-side, and download the output as a zip.
 
 ```bash
 .venv/bin/pip install -r requirements.txt   # includes Flask
 .venv/bin/python webgui.py                   # serves http://127.0.0.1:5000
 ```
 
-Open the URL, pick a PDF, adjust the options (OCR on/off, OCR language, min
-image size, context chars), and click **Parse PDF**. The parser runs as a
-subprocess of `main.py`; on success a download button returns
-`document.md` + `manifest.json` + `images/` packed into a single `.zip`.
-Per-run files live under `web_runs/` (gitignored).
+Open the URL, pick a file, adjust the options (OCR on/off, OCR language, min
+image size, context chars), and click **Parse**. The parser runs as a
+subprocess of `main.py`; on success a download button returns the output as a
+single `.zip`. Per-run files live under `web_runs/` (gitignored) and are
+deleted after 24h (`RUN_TTL_SECONDS`).
+
+### Batch mode: upload a ZIP
+
+Upload a `.zip` instead of a `.pdf` and every PDF inside it is parsed. The
+archive is searched recursively, and the result mirrors its directory layout
+with each `foo.pdf` replaced by a `foo/` directory of parsed output:
+
+```
+study.zip                        study_output.zip
+├── intro.pdf            →       ├── intro/
+├── chapters/                    │   ├── document.md
+│   ├── bio.pdf                  │   ├── manifest.json
+│   └── sub/                     │   └── images/
+│       └── chem.pdf             ├── chapters/
+└── notes.txt                    │   ├── bio/…
+    (non-PDFs ignored)           │   └── sub/chem/…
+                                 └── _batch_report.json
+```
+
+PDFs are parsed sequentially, and one bad file fails only its own entry — the
+rest still come back. `_batch_report.json` records the outcome of each:
+
+```json
+{
+  "total": 4,
+  "ok": 3,
+  "files": [
+    {"source": "chapters/bio.pdf", "output": "chapters/bio", "status": "ok", "log": "..."},
+    {"source": "chapters/broken.pdf", "output": "chapters/broken", "status": "failed", "log": "..."}
+  ]
+}
+```
+
+### Upload limits
+
+Uploaded archives are untrusted input, so extraction is bounded on every axis.
+Entries with absolute paths, `..` traversal, or symlinks are rejected outright
+(zip-slip), and sizes are counted from the bytes actually decompressed rather
+than the archive header, which a crafted zip can lie about.
+
+| Limit | Default | Env var |
+| --- | --- | --- |
+| Upload size | 200 MB | — |
+| Entries per archive | 2 000 | — |
+| Uncompressed size, one entry | 200 MB | — |
+| Uncompressed size, whole archive | 1 GB | — |
+| PDFs parsed per batch | 200 | — |
+| Time per PDF | 300 s | `PER_PDF_TIMEOUT` |
+| Run retention | 24 h | `RUN_TTL_SECONDS` |
+
+Nested ZIPs are not unpacked — only PDFs in the uploaded archive are parsed.
+
+Because a batch runs synchronously, a large one can outlast gunicorn's request
+timeout (`GUNICORN_TIMEOUT`, default 600 s) and get killed mid-run. Raise it
+when parsing big archives.
+
+The app has **no authentication or rate limiting**, and each request parses
+synchronously while holding a worker. It is built for personal/local use; put
+it behind an authenticating proxy before exposing it to a network you do not
+control.
 
 ### Run it in Docker
 

@@ -1,18 +1,26 @@
 #!/usr/bin/env python3
 """Minimal web GUI for the pdf-parser CLI.
 
-Upload a PDF, configure the parser options, run `main.py` server-side, then
-download the generated output (document.md + manifest.json + images/) as a zip.
+Upload a PDF -- or a ZIP archive of PDFs -- configure the parser options, run
+`main.py` server-side, then download the generated output as a zip.
+
+For a single PDF the output zip holds document.md + manifest.json + images/.
+For a ZIP upload every PDF found in the archive (recursively) is parsed and the
+input directory layout is mirrored in the result, with each `foo.pdf` replaced
+by a `foo/` directory holding that PDF's output, plus a `_batch_report.json`
+summarising per-file success or failure.
 
 Run with:
     .venv/bin/python webgui.py
 then open http://127.0.0.1:5000
 """
 
+import json
 import os
 import shutil
 import subprocess
 import sys
+import time
 import uuid
 import zipfile
 from pathlib import Path
@@ -30,6 +38,15 @@ BASE_DIR = Path(__file__).resolve().parent
 MAIN_SCRIPT = BASE_DIR / "main.py"
 RUNS_DIR = BASE_DIR / "web_runs"
 MAX_UPLOAD_BYTES = 200 * 1024 * 1024  # 200 MB
+
+# Limits applied to uploaded ZIPs. The archive is attacker-controlled input, so
+# every one of these is a hard stop rather than a best-effort hint.
+MAX_ZIP_ENTRIES = 2_000          # entries in the archive
+MAX_ENTRY_BYTES = 200 * 1024 * 1024      # uncompressed size of one entry
+MAX_TOTAL_BYTES = 1024 * 1024 * 1024     # uncompressed size of the whole archive
+MAX_PDFS = 200                   # PDFs parsed per batch
+PER_PDF_TIMEOUT = int(os.environ.get("PER_PDF_TIMEOUT", "300"))  # seconds
+RUN_TTL_SECONDS = int(os.environ.get("RUN_TTL_SECONDS", str(24 * 3600)))
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
@@ -78,13 +95,14 @@ PAGE = """<!doctype html>
 </head>
 <body>
   <h1>PDF Parser</h1>
-  <p class="sub">Upload a PDF, tune the options, and download the parsed output.</p>
+  <p class="sub">Upload a PDF, or a ZIP of PDFs, tune the options, and download the parsed output.</p>
 
   {% if error %}<div class="flash">{{ error }}</div>{% endif %}
 
   {% if result %}
   <div class="result">
-    <strong>Done.</strong> Parsed <code>{{ result.filename }}</code>.
+    <strong>Done.</strong> Parsed <code>{{ result.filename }}</code>{% if result.total %}
+    &mdash; {{ result.ok }}/{{ result.total }} PDF(s) succeeded{% endif %}.
     <a class="dl" href="{{ url_for('download', job_id=result.job_id) }}">Download output (.zip)</a>
   </div>
   <label>Parser log</label>
@@ -94,8 +112,11 @@ PAGE = """<!doctype html>
   <form method="post" action="{{ url_for('run') }}" enctype="multipart/form-data">
     <fieldset>
       <legend>Input</legend>
-      <label for="pdf">PDF file</label>
-      <input type="file" id="pdf" name="pdf" accept="application/pdf,.pdf" required>
+      <label for="pdf">PDF or ZIP file</label>
+      <input type="file" id="pdf" name="pdf" accept="application/pdf,.pdf,application/zip,.zip" required>
+      <p class="hint">A ZIP is searched recursively for PDFs; the result mirrors its
+      directory layout, with each <code>foo.pdf</code> replaced by a <code>foo/</code>
+      directory of parsed output.</p>
     </fieldset>
 
     <fieldset>
@@ -123,11 +144,139 @@ PAGE = """<!doctype html>
       </div>
     </fieldset>
 
-    <button type="submit">Parse PDF</button>
+    <button type="submit">Parse</button>
   </form>
 </body>
 </html>
 """
+
+
+class UnsafeArchive(Exception):
+    """Raised when an uploaded ZIP violates one of the safety limits."""
+
+
+def _member_target(name: str, dest: Path) -> Path:
+    """Resolve a ZIP entry name to a path inside `dest`, or raise.
+
+    Guards against zip-slip: absolute paths, `..` traversal, and anything that
+    resolves outside `dest`. `dest` is expected to be already resolved.
+    """
+    normalized = name.replace("\\", "/")
+    if normalized.startswith("/"):
+        raise UnsafeArchive(f"absolute path in archive: {name!r}")
+    parts = [part for part in normalized.split("/") if part not in ("", ".")]
+    if not parts:
+        raise UnsafeArchive(f"empty entry name in archive: {name!r}")
+    if ".." in parts:
+        raise UnsafeArchive(f"path traversal in archive: {name!r}")
+
+    target = (dest / Path(*parts)).resolve()
+    if target != dest and dest not in target.parents:
+        raise UnsafeArchive(f"entry escapes extraction root: {name!r}")
+    return target
+
+
+def extract_zip_safely(zip_path: Path, dest: Path) -> None:
+    """Extract `zip_path` into `dest`, enforcing the MAX_* limits.
+
+    Only regular files are written -- symlinks and other special entries are
+    rejected rather than skipped, since a symlink is the other half of a
+    zip-slip write. Sizes are counted from the bytes actually decompressed, not
+    from the header, because a crafted archive can lie in its header.
+    """
+    dest.mkdir(parents=True, exist_ok=True)
+    dest = dest.resolve()
+    total_written = 0
+
+    with zipfile.ZipFile(zip_path) as zf:
+        entries = zf.infolist()
+        if len(entries) > MAX_ZIP_ENTRIES:
+            raise UnsafeArchive(
+                f"archive has {len(entries)} entries (limit {MAX_ZIP_ENTRIES})")
+
+        for info in entries:
+            if info.is_dir():
+                _member_target(info.filename.rstrip("/"), dest).mkdir(
+                    parents=True, exist_ok=True)
+                continue
+
+            mode = info.external_attr >> 16
+            if mode and (mode & 0o170000) not in (0o100000, 0):
+                raise UnsafeArchive(
+                    f"archive contains a non-regular file: {info.filename!r}")
+
+            target = _member_target(info.filename, dest)
+            target.parent.mkdir(parents=True, exist_ok=True)
+
+            written = 0
+            with zf.open(info) as src_fh, open(target, "wb") as out_fh:
+                while True:
+                    chunk = src_fh.read(64 * 1024)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    total_written += len(chunk)
+                    if written > MAX_ENTRY_BYTES:
+                        raise UnsafeArchive(
+                            f"entry {info.filename!r} exceeds "
+                            f"{MAX_ENTRY_BYTES // (1024 * 1024)} MB uncompressed")
+                    if total_written > MAX_TOTAL_BYTES:
+                        raise UnsafeArchive(
+                            f"archive exceeds {MAX_TOTAL_BYTES // (1024 * 1024)} MB "
+                            "uncompressed (possible zip bomb)")
+                    out_fh.write(chunk)
+
+
+def find_pdfs(root: Path) -> list:
+    """Every .pdf under `root`, recursively, in a stable order."""
+    return sorted(
+        path for path in root.rglob("*")
+        if path.is_file() and path.suffix.lower() == ".pdf"
+    )
+
+
+def parse_one(pdf_path: Path, out_dir: Path, ocr_enabled: bool, ocr_lang: str,
+              min_image_size: int, context_chars: int):
+    """Run main.py on a single PDF. Returns (ok, log).
+
+    argv is a list and no shell is involved, and `pdf_path` is always absolute,
+    so a filename cannot be read as an option or injected into a command.
+    """
+    cmd = [
+        sys.executable, str(MAIN_SCRIPT), str(pdf_path),
+        "-o", str(out_dir),
+        "--ocr-lang", ocr_lang,
+        "--min-image-size", str(min_image_size),
+        "--context-chars", str(context_chars),
+    ]
+    if not ocr_enabled:
+        cmd.append("--no-ocr")
+
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              cwd=BASE_DIR, timeout=PER_PDF_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return False, f"timed out after {PER_PDF_TIMEOUT}s"
+
+    log = (proc.stdout + proc.stderr).strip()
+    if proc.returncode != 0 or not out_dir.exists():
+        return False, log or f"exit {proc.returncode}"
+    return True, log
+
+
+def cleanup_old_runs() -> None:
+    """Drop run directories older than RUN_TTL_SECONDS. Best effort."""
+    cutoff = time.time() - RUN_TTL_SECONDS
+    try:
+        candidates = list(RUNS_DIR.iterdir())
+    except OSError:
+        return
+    for entry in candidates:
+        try:
+            if entry.is_dir() and entry.stat().st_mtime < cutoff:
+                shutil.rmtree(entry, ignore_errors=True)
+        except OSError:
+            continue
 
 
 def render(error=None, result=None):
@@ -146,8 +295,10 @@ def run():
         return render(error="No file uploaded."), 400
 
     filename = secure_filename(file.filename)
-    if not filename.lower().endswith(".pdf"):
-        return render(error="Please upload a .pdf file."), 400
+    lower = filename.lower()
+    if not (lower.endswith(".pdf") or lower.endswith(".zip")):
+        return render(error="Please upload a .pdf or .zip file."), 400
+    is_zip = lower.endswith(".zip")
 
     # Parse + validate options.
     ocr_enabled = request.form.get("ocr") == "on"
@@ -162,31 +313,87 @@ def run():
     if min_image_size < 0 or context_chars < 0:
         return render(error="Numeric options must be non-negative."), 400
 
+    cleanup_old_runs()
+
     job_id = uuid.uuid4().hex
     job_dir = RUNS_DIR / job_id
     input_dir = job_dir / "input"
     output_dir = job_dir / "output"
     input_dir.mkdir(parents=True, exist_ok=True)
 
-    pdf_path = input_dir / filename
-    file.save(pdf_path)
+    upload_path = input_dir / filename
+    file.save(upload_path)
 
-    cmd = [
-        sys.executable, str(MAIN_SCRIPT), str(pdf_path),
-        "-o", str(output_dir),
-        "--ocr-lang", ocr_lang,
-        "--min-image-size", str(min_image_size),
-        "--context-chars", str(context_chars),
-    ]
-    if not ocr_enabled:
-        cmd.append("--no-ocr")
+    # Work out the list of PDFs to parse and the root their paths are relative
+    # to, so the output can mirror the input layout.
+    if is_zip:
+        extract_root = input_dir / "extracted"
+        try:
+            extract_zip_safely(upload_path, extract_root)
+        except UnsafeArchive as exc:
+            shutil.rmtree(job_dir, ignore_errors=True)
+            return render(error=f"Rejected archive: {exc}"), 400
+        except zipfile.BadZipFile:
+            shutil.rmtree(job_dir, ignore_errors=True)
+            return render(error="That file is not a readable ZIP archive."), 400
 
-    proc = subprocess.run(cmd, capture_output=True, text=True, cwd=BASE_DIR)
-    log = (proc.stdout + proc.stderr).strip()
+        pdfs = find_pdfs(extract_root)
+        if not pdfs:
+            shutil.rmtree(job_dir, ignore_errors=True)
+            return render(error="No PDFs found in that archive."), 400
+        if len(pdfs) > MAX_PDFS:
+            shutil.rmtree(job_dir, ignore_errors=True)
+            return render(
+                error=f"Archive holds {len(pdfs)} PDFs (limit {MAX_PDFS})."), 400
+    else:
+        extract_root = input_dir
+        pdfs = [upload_path]
 
-    if proc.returncode != 0 or not output_dir.exists():
+    # Parse each PDF. One bad file fails only its own entry.
+    report = []
+    logs = []
+    ok_count = 0
+    used_dirs = set()
+
+    for pdf_path in pdfs:
+        rel = pdf_path.relative_to(extract_root)
+        if is_zip:
+            # foo/bar.pdf -> foo/bar/ , de-duplicated if two names collide
+            # (e.g. "a.pdf" and "a.PDF" in the same directory).
+            out_dir = output_dir / rel.parent / rel.stem
+            suffix = 1
+            while out_dir in used_dirs:
+                suffix += 1
+                out_dir = output_dir / rel.parent / f"{rel.stem}_{suffix}"
+            used_dirs.add(out_dir)
+        else:
+            # Single PDF: keep the original flat layout in the zip.
+            out_dir = output_dir
+
+        ok, log = parse_one(pdf_path, out_dir, ocr_enabled, ocr_lang,
+                            min_image_size, context_chars)
+        if ok:
+            ok_count += 1
+        report.append({
+            "source": rel.as_posix(),
+            "output": out_dir.relative_to(output_dir).as_posix() or ".",
+            "status": "ok" if ok else "failed",
+            "log": log,
+        })
+        logs.append(f"[{'ok' if ok else 'FAILED'}] {rel.as_posix()}"
+                    + ("" if ok else f"\n{log}"))
+
+    if ok_count == 0:
+        detail = "\n\n".join(logs)
         shutil.rmtree(job_dir, ignore_errors=True)
-        return render(error=f"Parsing failed (exit {proc.returncode}).\n\n{log}"), 500
+        return render(error=f"Parsing failed for every PDF.\n\n{detail}"), 500
+
+    if is_zip:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "_batch_report.json").write_text(
+            json.dumps({"total": len(pdfs), "ok": ok_count, "files": report},
+                       indent=2, ensure_ascii=False)
+        )
 
     zip_path = job_dir / f"{Path(filename).stem}_output.zip"
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -194,7 +401,13 @@ def run():
             if item.is_file():
                 zf.write(item, item.relative_to(output_dir))
 
-    return render(result={"job_id": job_id, "filename": filename, "log": log})
+    return render(result={
+        "job_id": job_id,
+        "filename": filename,
+        "log": "\n\n".join(logs),
+        "total": len(pdfs) if is_zip else 0,
+        "ok": ok_count,
+    })
 
 
 @app.get("/download/<job_id>")
