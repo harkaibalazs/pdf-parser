@@ -37,14 +37,39 @@ from werkzeug.utils import secure_filename
 BASE_DIR = Path(__file__).resolve().parent
 MAIN_SCRIPT = BASE_DIR / "main.py"
 RUNS_DIR = BASE_DIR / "web_runs"
-MAX_UPLOAD_BYTES = 200 * 1024 * 1024  # 200 MB
+
+
+def _env_mb(name: str, default_mb: int) -> int:
+    """Read a megabyte-valued env override, returning bytes.
+
+    Sizes are configured in whole MB (MAX_UPLOAD_MB=512) because that is how
+    the matching limits on the proxy and the pod are usually expressed.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default_mb * 1024 * 1024
+    try:
+        value = int(raw)
+    except ValueError:
+        return default_mb * 1024 * 1024
+    return max(1, value) * 1024 * 1024
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.environ.get(name, default)))
+    except ValueError:
+        return default
+
+
+MAX_UPLOAD_BYTES = _env_mb("MAX_UPLOAD_MB", 512)
 
 # Limits applied to uploaded ZIPs. The archive is attacker-controlled input, so
 # every one of these is a hard stop rather than a best-effort hint.
-MAX_ZIP_ENTRIES = 2_000          # entries in the archive
-MAX_ENTRY_BYTES = 200 * 1024 * 1024      # uncompressed size of one entry
-MAX_TOTAL_BYTES = 1024 * 1024 * 1024     # uncompressed size of the whole archive
-MAX_PDFS = 200                   # PDFs parsed per batch
+MAX_ZIP_ENTRIES = _env_int("MAX_ZIP_ENTRIES", 2_000)   # entries in the archive
+MAX_ENTRY_BYTES = _env_mb("MAX_ENTRY_MB", 512)         # uncompressed, one entry
+MAX_TOTAL_BYTES = _env_mb("MAX_TOTAL_MB", 4096)        # uncompressed, whole archive
+MAX_PDFS = _env_int("MAX_PDFS", 200)                   # PDFs parsed per batch
 PER_PDF_TIMEOUT = int(os.environ.get("PER_PDF_TIMEOUT", "300"))  # seconds
 RUN_TTL_SECONDS = int(os.environ.get("RUN_TTL_SECONDS", str(24 * 3600)))
 
@@ -116,7 +141,7 @@ PAGE = """<!doctype html>
       <input type="file" id="pdf" name="pdf" accept="application/pdf,.pdf,application/zip,.zip" required>
       <p class="hint">A ZIP is searched recursively for PDFs; the result mirrors its
       directory layout, with each <code>foo.pdf</code> replaced by a <code>foo/</code>
-      directory of parsed output.</p>
+      directory of parsed output. Maximum upload size: {{ max_upload_mb }} MB.</p>
     </fieldset>
 
     <fieldset>
@@ -280,7 +305,25 @@ def cleanup_old_runs() -> None:
 
 
 def render(error=None, result=None):
-    return render_template_string(PAGE, error=error, result=result)
+    return render_template_string(
+        PAGE, error=error, result=result,
+        max_upload_mb=MAX_UPLOAD_BYTES // (1024 * 1024))
+
+
+@app.errorhandler(413)
+def upload_too_large(_exc):
+    """Werkzeug aborts oversized uploads before `run()` sees the request.
+
+    Without this the client gets Flask's bare 413 page -- or, because the
+    response goes out while the browser is still sending the body, what looks
+    like a dropped connection. Render the normal page with a real explanation
+    instead.
+    """
+    limit = MAX_UPLOAD_BYTES // (1024 * 1024)
+    return render(
+        error=f"That upload is over the {limit} MB limit. Split the archive into "
+              f"smaller ZIPs, or raise MAX_UPLOAD_MB on the server (and the "
+              f"matching body-size limit on the proxy in front of it)."), 413
 
 
 @app.get("/")

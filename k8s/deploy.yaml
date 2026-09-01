@@ -31,7 +31,18 @@ spec:
             - name: WEB_CONCURRENCY
               value: "4"
             - name: GUNICORN_TIMEOUT
-              value: "600"
+              value: "1200"
+            # Upload ceiling. The proxy in front of this (the Gateway the
+            # HTTPRoute attaches to) enforces its own request-body limit, so
+            # raising this alone is not enough -- the two have to match, or the
+            # proxy rejects the upload before it reaches the pod.
+            - name: MAX_UPLOAD_MB
+              value: "512"
+            # Uncompressed size of a whole archive. Kept under the emptyDir
+            # sizeLimit below, which also has to hold the extracted PDFs, the
+            # parsed output, and the result zip.
+            - name: MAX_TOTAL_MB
+              value: "2048"
           readinessProbe:
             httpGet:
               path: /
@@ -48,13 +59,21 @@ spec:
             requests:
               cpu: 250m
               memory: 256Mi
+              ephemeral-storage: 2Gi
             limits:
               cpu: "1"
               memory: 1Gi
+              # Uploads and output are streamed to disk, not buffered in
+              # memory, so it is ephemeral storage that a large batch exhausts.
+              # Without a limit the pod can get evicted for filling the node.
+              ephemeral-storage: 8Gi
           volumeMounts:
             - name: runs
               mountPath: /app/web_runs
       volumes:
-        # Ephemeral scratch space for uploads + generated output.
+        # Ephemeral scratch space for uploads + generated output. One run holds
+        # the upload, the extracted PDFs, the parsed output and the result zip
+        # at once, so size this well above MAX_UPLOAD_MB.
         - name: runs
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: 8Gi

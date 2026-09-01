@@ -138,19 +138,31 @@ than the archive header, which a crafted zip can lie about.
 
 | Limit | Default | Env var |
 | --- | --- | --- |
-| Upload size | 200 MB | — |
-| Entries per archive | 2 000 | — |
-| Uncompressed size, one entry | 200 MB | — |
-| Uncompressed size, whole archive | 1 GB | — |
-| PDFs parsed per batch | 200 | — |
+| Upload size | 512 MB | `MAX_UPLOAD_MB` |
+| Entries per archive | 2 000 | `MAX_ZIP_ENTRIES` |
+| Uncompressed size, one entry | 512 MB | `MAX_ENTRY_MB` |
+| Uncompressed size, whole archive | 4 GB | `MAX_TOTAL_MB` |
+| PDFs parsed per batch | 200 | `MAX_PDFS` |
 | Time per PDF | 300 s | `PER_PDF_TIMEOUT` |
 | Run retention | 24 h | `RUN_TTL_SECONDS` |
 
 Nested ZIPs are not unpacked — only PDFs in the uploaded archive are parsed.
 
+An upload over `MAX_UPLOAD_MB` is refused with a 413 and an explanatory message
+on the page. Raising the variable is only half the job when the app sits behind
+a proxy: the proxy enforces its own request-body limit, and the smaller of the
+two wins. In Kubernetes that limit belongs to the Gateway the `HTTPRoute`
+attaches to, not to this app.
+
+Disk matters as much as the size cap. A run holds the upload, the extracted
+PDFs, the parsed output and the result zip on local disk simultaneously, so
+allow several times `MAX_UPLOAD_MB` of scratch space (`k8s/deploy.yaml` sizes
+the `web_runs` volume and the pod's `ephemeral-storage` accordingly).
+
 Because a batch runs synchronously, a large one can outlast gunicorn's request
-timeout (`GUNICORN_TIMEOUT`, default 600 s) and get killed mid-run. Raise it
-when parsing big archives.
+timeout (`GUNICORN_TIMEOUT`, default 600 s) and get killed mid-run — the browser
+sees a 502 with no output. A few hundred MB of PDFs with OCR on will exceed
+600 s; raise the timeout when parsing big archives.
 
 The app has **no authentication or rate limiting**, and each request parses
 synchronously while holding a worker. It is built for personal/local use; put
